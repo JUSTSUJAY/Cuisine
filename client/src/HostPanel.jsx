@@ -32,29 +32,24 @@ export default function HostPanel() {
   return (
     <div>
       <h1>Hosting Game: {gameId}</h1>
-      {gameState.status === 'lobby' && (
-        <button onClick={startGame}>Start Game</button>
-      )}
-      {gameState.status === 'playing' && (
-        <button onClick={nextQuestion}>Next Question</button>
-      )}
+      {gameState.status === 'lobby' && <button onClick={startGame}>Start Game</button>}
+      {gameState.status === 'playing' && <button onClick={nextQuestion}>Next Question</button>}
       <h2>Players</h2>
       <ul>
-        {gameState.players.map((player) => (
+        {gameState.players.map(player => (
           <li key={player.id}>
             {player.name} - {player.score} pts
           </li>
         ))}
       </ul>
       <h2>Current Question</h2>
-      {gameState.currentQuestionObj ? (
+      {gameState.currentQuestion ? (
         <div>
-          <p>{gameState.currentQuestionObj.category}</p>
-          <p>{gameState.currentQuestionObj.text}</p>
-          <p>Answer: {gameState.currentQuestionObj.answer}</p>
+          <p>{gameState.currentQuestion.question}</p>
+          <p><strong>Answer:</strong> {gameState.currentQuestion.answer}</p>
         </div>
       ) : (
-        <p>No more questions available.</p>
+        <p>No questions available. Please check the quiz configuration.</p>
       )}
     </div>
   );

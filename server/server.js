@@ -4,8 +4,12 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import crypto from 'crypto';
 import axios from 'axios';
+import loadEnv from '../envLoader.js';
 
-const OPENAI_API_KEY="REMOVED FOR NOW"
+// Load environment variables
+const env = loadEnv();
+
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 const app = express();
 const server = createServer(app);
@@ -35,21 +39,58 @@ const getPublicGameState = (game) => ({
 const generateQuizContent = async (config) => {
   const { rounds, categoriesPerRound, questionsPerCategory } = config;
 
-  // Example API call to an LLM (replace with your actual LLM API)
-  const response = await axios.post('https://api.openai.com/v1/completions', {
-    prompt: `Generate ${rounds} rounds of quiz content with ${categoriesPerRound} categories per round and ${questionsPerCategory} questions per category. Each category should have a name and description. Each question should be open-ended with a clear answer.`,
-    max_tokens: 500,
-    temperature: 0.7,
-    model: "text-davinci-003",
-  }, {
-    headers: {
-      'Authorization': `Bearer OPENAI_API_KEY`,
-      'Content-Type': 'application/json'
-    }
-  });
+  try {
+    const response = await axios.post('https://api.openai.com/v1/chat/completions', {
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: `
+Generate quiz content for ${rounds} rounds with ${categoriesPerRound} categories per round and ${questionsPerCategory} questions per category. Each category should have a name, description, and open-ended questions with clear answers. Return the output as a JSON object with the following structure:
+{
+  "potentialCategories": [
+    { "name": "Category Name", "description": "Category Description" }
+  ],
+  "quizData": {
+    "rounds": [
+      {
+        "roundNumber": 1,
+        "categories": [
+          {
+            "name": "Category Name",
+            "questions": [
+              { "question": "Question Text", "answer": "Answer" }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
+`
+        },
+        {
+          role: "user",
+          content: `Generate ${rounds} rounds of quiz content with ${categoriesPerRound} categories per round and ${questionsPerCategory} questions per category. Each category should have a name and description. Each question should be open-ended with a clear answer.`
+        }
+      ],
+      temperature: 0.7
+    }, {
+      headers: {
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      }
+    });
 
-  const quizData = JSON.parse(response.data.choices[0].text);
-  return quizData;
+    console.log("Raw Quiz Content:", response.data.choices[0].message.content);
+
+    const quizData = JSON.parse(response.data.choices[0].message.content);
+    console.log("Parsed Quiz Content:", quizData);
+    return quizData;
+  } catch (error) {
+    console.error("Failed to generate quiz content:", error.response?.data || error.message);
+    throw new Error("Failed to generate quiz content. Please check your OpenAI API configuration.");
+  }
 };
 
 // REST API Endpoints
@@ -74,6 +115,7 @@ app.post('/api/games', async (req, res) => {
 
     console.log(`Game created: ${gameId}`);
     res.status(201).json({ gameId });
+    console.log("Quiz Content:", quizContent);
   } catch (error) {
     console.error("Game creation error:", error);
     res.status(500).json({ error: error.message });
@@ -123,10 +165,13 @@ io.on('connection', (socket) => {
       const game = activeGames.get(gameId);
       if (!game) throw new Error("Game not found");
       if (socket.id !== game.hostSocket) throw new Error("Unauthorized");
-
+  
       game.state = 'playing';
       game.currentQuestionIndex = 0;
       game.currentQuestionObj = getCurrentQuestion(game);
+  
+      console.log("Current Question Object:", game.currentQuestionObj); // Debugging log
+  
       io.to(gameId).emit('gameState', getPublicGameState(game));
       console.log(`Game started: ${gameId}`);
     } catch (error) {
@@ -191,16 +236,33 @@ io.on('connection', (socket) => {
 // Helper function to get the current question based on the game state
 const getCurrentQuestion = (game) => {
   const { quizContent, currentRound, currentQuestionIndex } = game;
+
+  // Validate quiz content
+  if (!quizContent || !quizContent.quizData || !Array.isArray(quizContent.quizData.rounds)) {
+    console.error("Invalid quiz content:", quizContent);
+    return null;
+  }
+
   const roundIndex = currentRound - 1;
 
-  if (
-    roundIndex < quizContent.rounds.length &&
-    currentQuestionIndex < quizContent.rounds[roundIndex].categories.flatMap(cat => cat.questions).length
-  ) {
-    const questions = quizContent.rounds[roundIndex].categories.flatMap(cat => cat.questions);
-    return questions[currentQuestionIndex];
+  // Validate current round
+  if (roundIndex < 0 || roundIndex >= quizContent.quizData.rounds.length) {
+    console.error("Invalid round index:", roundIndex);
+    return null;
   }
-  return null; // No more questions
+
+  const round = quizContent.quizData.rounds[roundIndex];
+
+  // Flatten all questions in the current round
+  const questions = round.categories.flatMap(cat => cat.questions);
+
+  // Validate current question index
+  if (currentQuestionIndex < 0 || currentQuestionIndex >= questions.length) {
+    console.error("Invalid question index:", currentQuestionIndex);
+    return null;
+  }
+
+  return questions[currentQuestionIndex];
 };
 
 const PORT = process.env.PORT || 5000;
