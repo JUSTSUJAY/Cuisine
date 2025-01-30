@@ -1,8 +1,11 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { io } from 'socket.io-client';
+import { useNavigate } from 'react-router-dom';
+
 
 export default function PlayerLobby() {
+  const navigate = useNavigate();
   const { gameId } = useParams();
   const [name, setName] = useState('');
   const [socket, setSocket] = useState(null);
@@ -15,16 +18,28 @@ export default function PlayerLobby() {
     });
   };
 
+
   useEffect(() => {
     const newSocket = io('http://localhost:5000');
     setSocket(newSocket);
 
     newSocket.on('gameState', (state) => {
+      console.log('Received game state:', state); // Debug log
       setGameState(state);
+      if (state.status === 'playing') {
+        console.log('Game is starting, navigating to game screen'); // Debug log
+        navigate(`/game/${gameId}`);
+      }
+    });
+
+    // Add connection event
+    newSocket.on('connect', () => {
+      console.log('Socket connected:', newSocket.id);
     });
 
     return () => newSocket.disconnect();
-  }, []);
+}, [gameId, navigate]);
+
 
   return (
     <div className="max-w-md mx-auto p-6">

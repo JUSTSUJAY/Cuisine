@@ -32,8 +32,10 @@ const getPublicGameState = (game) => ({
   status: game.state,
   players: Array.from(game.players.values()),
   currentRound: game.currentRound || 1,
-  currentQuestion: game.currentQuestionObj || null
+  currentQuestion: game.currentQuestionObj,
+  currentCategory: game.quizContent.quizData.rounds[game.currentRound - 1].categories[0].name
 });
+
 
 // Function to generate quiz content using an LLM
 const generateQuizContent = async (config) => {
@@ -98,11 +100,18 @@ app.post('/api/games', async (req, res) => {
   try {
     const gameConfig = req.body;
     if (!gameConfig) throw new Error("Invalid game configuration");
-
     const gameId = crypto.randomUUID().slice(0, 6).toUpperCase();
+
+    // Generate quiz content using the LLM
     const quizContent = await generateQuizContent(gameConfig);
 
-    activeGames.set(gameId, {
+    // Log and validate the quiz content
+    console.log("Generated Quiz Content:", JSON.stringify(quizContent, null, 2));
+    if (!quizContent.quizData || !Array.isArray(quizContent.quizData.rounds)) {
+      throw new Error("Invalid quiz content structure.");
+    }
+
+    const initialGameState = {
       config: gameConfig,
       quizContent,
       players: new Map(),
@@ -110,12 +119,16 @@ app.post('/api/games', async (req, res) => {
       hostSocket: null,
       currentRound: 1,
       currentQuestionIndex: 0,
-      currentBuzzer: null
-    });
+      currentBuzzer: null,
+      // Add this line to initialize the current question
+      currentQuestionObj: quizContent.quizData.rounds[0].categories[0].questions[0]
+    };
+
+    // Save the game state
+    activeGames.set(gameId, initialGameState);
 
     console.log(`Game created: ${gameId}`);
     res.status(201).json({ gameId });
-    console.log("Quiz Content:", quizContent);
   } catch (error) {
     console.error("Game creation error:", error);
     res.status(500).json({ error: error.message });
@@ -167,36 +180,36 @@ io.on('connection', (socket) => {
       if (socket.id !== game.hostSocket) throw new Error("Unauthorized");
   
       game.state = 'playing';
+      game.currentRound = 1;
       game.currentQuestionIndex = 0;
-      game.currentQuestionObj = getCurrentQuestion(game);
-  
-      console.log("Current Question Object:", game.currentQuestionObj); // Debugging log
+      game.currentQuestionObj = game.quizContent.quizData.rounds[0].categories[0].questions[0];
   
       io.to(gameId).emit('gameState', getPublicGameState(game));
-      console.log(`Game started: ${gameId}`);
+      console.log(`Game started: ${gameId} with first question:`, game.currentQuestionObj);
     } catch (error) {
       socket.emit('error', error.message);
     }
   });
-
+  
+  
   socket.on('advanceQuestion', (gameId) => {
     try {
       const game = activeGames.get(gameId);
       if (!game) throw new Error("Game not found");
       if (socket.id !== game.hostSocket) throw new Error("Unauthorized");
-
+  
       game.currentQuestionIndex++;
       game.currentBuzzer = null;
-
+  
       // Reset player buzz states
       game.players.forEach(player => {
         player.hasBuzzed = false;
       });
-
+  
       // Get the next question
       game.currentQuestionObj = getCurrentQuestion(game);
       game.state = 'questionActive';
-
+  
       io.to(gameId).emit('gameState', getPublicGameState(game));
       console.log(`Question advanced to ${game.currentQuestionIndex} in ${gameId}`);
     } catch (error) {
@@ -262,7 +275,9 @@ const getCurrentQuestion = (game) => {
     return null;
   }
 
-  return questions[currentQuestionIndex];
+  const question = questions[currentQuestionIndex];
+  console.log("Current Question Object:", question);
+  return question;
 };
 
 const PORT = process.env.PORT || 5000;

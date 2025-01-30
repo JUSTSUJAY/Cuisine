@@ -56,18 +56,20 @@ export default function GameConfig() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config)
       });
-
+  
       if (!response.ok) {
         throw new Error('Failed to create game');
       }
-
+  
       const { gameId } = await response.json();
+      console.log('Created game with ID:', gameId); // Add this for debugging
       navigate(`/host/${gameId}`);
     } catch (error) {
       console.error('Game creation failed:', error);
       alert('Failed to create game. Please try again.');
     }
   };
+  
 
   return (
     <div>

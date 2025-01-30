@@ -8,33 +8,41 @@ export default function GamePlay() {
   const [gameState, setGameState] = useState(null);
   const [playerState, setPlayerState] = useState({
     hasBuzzed: false,
-    lastAnswerCorrect: null
+    lastAnswerCorrect: null,
+    canAnswer: false
   });
+  const [answer, setAnswer] = useState('');
 
   useEffect(() => {
     const newSocket = io('http://localhost:5000');
     setSocket(newSocket);
+
     newSocket.on('gameState', (state) => {
       setGameState(state);
       setPlayerState(prev => ({
         ...prev,
         hasBuzzed: false,
-        lastAnswerCorrect: null
+        canAnswer: false
       }));
+      setAnswer('');
     });
+
     newSocket.on('buzzAcknowledged', ({ success }) => {
       setPlayerState(prev => ({
         ...prev,
         hasBuzzed: success,
-        lastAnswerCorrect: null
+        canAnswer: success
       }));
     });
+
     newSocket.on('answerResult', ({ correct }) => {
       setPlayerState(prev => ({
         ...prev,
-        lastAnswerCorrect: correct
+        lastAnswerCorrect: correct,
+        canAnswer: false
       }));
     });
+
     return () => newSocket.disconnect();
   }, [gameId]);
 
@@ -44,32 +52,112 @@ export default function GamePlay() {
     }
   };
 
-  if (!gameState) return <div>Loading game...</div>;
+  const handleAnswerSubmit = (e) => {
+    e.preventDefault();
+    if (playerState.canAnswer && answer.trim()) {
+      socket.emit('submitAnswer', {
+        gameId,
+        answer: answer.trim()
+      });
+      setAnswer('');
+    }
+  };
+
+  const getCurrentPlayer = () => {
+    return gameState?.players.find(p => p.id === socket.id);
+  };
+
+  if (!gameState) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
+          <p className="text-lg">Loading game...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div>
-      <h1>Round {gameState.currentRound}</h1>
-      <h2>Your Score: {gameState.players.find(p => p.id === socket.id)?.score || 0}</h2>
-      <h2>Current Question</h2>
-      {gameState.currentQuestionObj ? (
-        <div>
-          <p>{gameState.currentQuestionObj.category}</p>
-          <p>{gameState.currentQuestionObj.text}</p>
-          <button onClick={handleBuzz} disabled={playerState.hasBuzzed}>
-            {playerState.hasBuzzed ? 'BUZZED IN!' : 'BUZZ!'}
-          </button>
+    <div className="max-w-4xl mx-auto p-6">
+      <div className="mb-8">
+        <h1 className="text-3xl font-bold mb-2">Round {gameState.currentRound}</h1>
+        <div className="bg-purple-100 p-4 rounded-lg">
+          <h2 className="text-xl">
+            Your Score: {getCurrentPlayer()?.score || 0} points
+          </h2>
         </div>
-      ) : (
-        <p>Waiting for host to start the next question...</p>
+      </div>
+
+      {gameState.currentQuestion && (
+        <div className="bg-white rounded-lg shadow-md p-6 mb-8">
+          <div className="mb-4">
+            <span className="bg-purple-500 text-white px-3 py-1 rounded-full text-sm">
+              {gameState.currentCategory}
+            </span>
+          </div>
+          
+          <p className="text-xl mb-6">{gameState.currentQuestion.question}</p>
+
+          {playerState.canAnswer ? (
+            <form onSubmit={handleAnswerSubmit} className="space-y-4">
+              <input
+                type="text"
+                value={answer}
+                onChange={(e) => setAnswer(e.target.value)}
+                placeholder="Type your answer..."
+                className="w-full p-3 border rounded-lg"
+                autoFocus
+              />
+              <button
+                type="submit"
+                className="w-full bg-green-500 hover:bg-green-600 text-white py-3 rounded-lg font-bold"
+              >
+                Submit Answer
+              </button>
+            </form>
+          ) : (
+            <button
+              onClick={handleBuzz}
+              disabled={playerState.hasBuzzed}
+              className={`w-full py-4 rounded-lg font-bold text-lg ${
+                playerState.hasBuzzed
+                  ? 'bg-gray-300 cursor-not-allowed'
+                  : 'bg-blue-500 hover:bg-blue-600 text-white'
+              }`}
+            >
+              {playerState.hasBuzzed ? 'BUZZED!' : 'BUZZ TO ANSWER'}
+            </button>
+          )}
+
+          {playerState.lastAnswerCorrect !== null && (
+            <div className={`mt-4 p-3 rounded-lg text-center ${
+              playerState.lastAnswerCorrect
+                ? 'bg-green-100 text-green-700'
+                : 'bg-red-100 text-red-700'
+            }`}>
+              {playerState.lastAnswerCorrect ? 'Correct!' : 'Incorrect!'}
+            </div>
+          )}
+        </div>
       )}
-      <h2>Players</h2>
-      <ul>
-        {gameState.players.map(player => (
-          <li key={player.id}>
-            {player.name} - {player.score} pts
-          </li>
-        ))}
-      </ul>
+
+      <div className="bg-white rounded-lg shadow-md p-6">
+        <h2 className="text-xl font-bold mb-4">Players</h2>
+        <div className="space-y-2">
+          {gameState.players.map(player => (
+            <div
+              key={player.id}
+              className={`flex justify-between p-3 rounded-lg ${
+                player.id === socket.id ? 'bg-purple-100' : 'bg-gray-50'
+              }`}
+            >
+              <span className="font-medium">{player.name}</span>
+              <span className="font-bold">{player.score} pts</span>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
