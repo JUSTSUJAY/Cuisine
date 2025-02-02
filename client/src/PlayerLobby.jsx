@@ -12,11 +12,13 @@ export default function PlayerLobby() {
   const [gameState, setGameState] = useState(null);
 
   const joinGame = () => {
+    localStorage.setItem('playerName', name);
     socket.emit('joinGame', { 
       gameId,
       playerName: name
     });
-  };
+};
+
 
 
   useEffect(() => {

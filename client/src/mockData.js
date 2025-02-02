@@ -3,8 +3,7 @@ export const mockCategories = [
       name: "Anagrammed Countries",
       description: "Unscramble these country names!",
       questions: [
-        { question: "L I R A P A", answer: "PAKISTAN" },
-        { question: "N E R D A L N", answer: "ENGLAND" }
+        { question: "A mad gas car", answer: "Madagascar" },
       ]
     },
     {

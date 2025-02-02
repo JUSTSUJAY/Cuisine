@@ -36,7 +36,6 @@ const getPublicGameState = (game) => ({
   currentCategory: game.quizContent.quizData.rounds[game.currentRound - 1].categories[0].name
 });
 
-
 // Function to generate quiz content using an LLM
 const generateQuizContent = async (config) => {
   const { rounds, categoriesPerRound, questionsPerCategory } = config;
@@ -120,7 +119,7 @@ app.post('/api/games', async (req, res) => {
       currentRound: 1,
       currentQuestionIndex: 0,
       currentBuzzer: null,
-      // Add this line to initialize the current question
+      // Initialize the current question from the first category of the first round
       currentQuestionObj: quizContent.quizData.rounds[0].categories[0].questions[0]
     };
 
@@ -152,22 +151,27 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('joinGame', ({ gameId, playerName }) => {
+  // Modified joinGame handler to allow rejoining after the game starts
+  socket.on('joinGame', ({ gameId, playerName, rejoin }) => {
     try {
       const game = activeGames.get(gameId);
       if (!game) throw new Error("Game not found");
-      if (game.state !== 'lobby') throw new Error("Game has already started");
+      // Allow joining if the game is in lobby or if rejoining (player already joined before)
+      if (game.state !== 'lobby' && !rejoin) throw new Error("Game has already started");
 
-      const playerData = {
-        id: socket.id,
-        name: playerName,
-        score: 0,
-        hasBuzzed: false
-      };
-      game.players.set(socket.id, playerData);
+      // If this is a new connection (or rejoining), add/update player data.
+      if (!game.players.has(socket.id)) {
+        const playerData = {
+          id: socket.id,
+          name: playerName,
+          score: 0,
+          hasBuzzed: false
+        };
+        game.players.set(socket.id, playerData);
+      }
       socket.join(gameId);
-      console.log(`Player joined: ${playerName} (${socket.id}) in ${gameId}`);
       io.to(gameId).emit('gameState', getPublicGameState(game));
+      console.log(`Player joined: ${playerName} (${socket.id}) in ${gameId}`);
     } catch (error) {
       socket.emit('error', error.message);
     }
@@ -178,12 +182,12 @@ io.on('connection', (socket) => {
       const game = activeGames.get(gameId);
       if (!game) throw new Error("Game not found");
       if (socket.id !== game.hostSocket) throw new Error("Unauthorized");
-  
+
       game.state = 'playing';
       game.currentRound = 1;
       game.currentQuestionIndex = 0;
       game.currentQuestionObj = game.quizContent.quizData.rounds[0].categories[0].questions[0];
-  
+
       io.to(gameId).emit('gameState', getPublicGameState(game));
       console.log(`Game started: ${gameId} with first question:`, game.currentQuestionObj);
     } catch (error) {
@@ -191,13 +195,12 @@ io.on('connection', (socket) => {
     }
   });
   
-  
   socket.on('advanceQuestion', (gameId) => {
     try {
       const game = activeGames.get(gameId);
       if (!game) throw new Error("Game not found");
       if (socket.id !== game.hostSocket) throw new Error("Unauthorized");
-  
+
       game.currentQuestionIndex++;
       game.currentBuzzer = null;
   
@@ -211,7 +214,7 @@ io.on('connection', (socket) => {
       game.state = 'questionActive';
   
       io.to(gameId).emit('gameState', getPublicGameState(game));
-      console.log(`Question advanced to ${game.currentQuestionIndex} in ${gameId}`);
+      console.log(`Question advanced to index ${game.currentQuestionIndex} in ${gameId}`);
     } catch (error) {
       socket.emit('error', error.message);
     }
@@ -243,6 +246,7 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);
+    // Optionally remove player from game.players if desired
   });
 });
 
