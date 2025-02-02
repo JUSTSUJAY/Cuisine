@@ -8,8 +8,9 @@ export default function GamePlay() {
   const [gameState, setGameState] = useState(null);
   const [playerState, setPlayerState] = useState({
     hasBuzzed: false,
-    lastAnswerCorrect: null,
-    canAnswer: false
+    canAnswer: false,
+    buzzMessage: '',
+    answerFeedback: ''
   });
   const [answer, setAnswer] = useState('');
 
@@ -18,14 +19,10 @@ export default function GamePlay() {
     console.log('Socket initialized');
     setSocket(newSocket);
 
-    // Keep the player's name when transitioning from lobby
-    const playerName = localStorage.getItem('playerName');
-    
-    newSocket.emit('joinGame', { 
-      gameId,
-      playerName,
-      rejoin: true 
-    });
+    // Retrieve identity from sessionStorage (unique per tab)
+    const playerName = sessionStorage.getItem('playerName');
+    const playerId = sessionStorage.getItem('playerId');
+    newSocket.emit('joinGame', { gameId, playerName, playerId, rejoin: true });
     console.log('Emitted joinGame event');
 
     newSocket.on('connect', () => {
@@ -35,6 +32,34 @@ export default function GamePlay() {
     newSocket.on('gameState', (state) => {
       console.log('Received game state:', state);
       setGameState(state);
+      setPlayerState(prev => ({ ...prev, answerFeedback: '' }));
+      // If not our turn to answer, disable answer form.
+      if (state.currentAnswerer !== playerId) {
+        setPlayerState(prev => ({ ...prev, canAnswer: false }));
+      }
+      // Reset buzz status when a new question begins.
+      if (state.status === 'questionActive') {
+        setPlayerState(prev => ({ ...prev, hasBuzzed: false, buzzMessage: '' }));
+      }
+    });
+
+    newSocket.on('allowAnswer', () => {
+      console.log('Received allowAnswer event');
+      setPlayerState(prev => ({ ...prev, canAnswer: true, buzzMessage: "It's your turn to answer!" }));
+    });
+
+    newSocket.on('buzzAcknowledged', (data) => {
+      console.log('Buzz acknowledgment:', data);
+      if (data.success) {
+        setPlayerState(prev => ({ ...prev, hasBuzzed: true, buzzMessage: data.message }));
+      } else {
+        setPlayerState(prev => ({ ...prev, buzzMessage: data.message }));
+      }
+    });
+
+    newSocket.on('answerResult', (data) => {
+      console.log('Answer result:', data);
+      setPlayerState(prev => ({ ...prev, answerFeedback: data.message, canAnswer: false }));
     });
 
     return () => newSocket.disconnect();
@@ -49,16 +74,14 @@ export default function GamePlay() {
   const handleAnswerSubmit = (e) => {
     e.preventDefault();
     if (playerState.canAnswer && answer.trim() && socket) {
-      socket.emit('submitAnswer', {
-        gameId,
-        answer: answer.trim()
-      });
+      socket.emit('submitAnswer', { gameId, answer: answer.trim() });
       setAnswer('');
     }
   };
 
   const getCurrentPlayer = () => {
-    return gameState?.players.find(p => p.id === socket.id);
+    // Find the player by matching the socket id with the stored socket id in the game state.
+    return gameState?.players.find(p => p.socketId === socket.id);
   };
 
   return (
@@ -79,7 +102,6 @@ export default function GamePlay() {
                   {gameState.currentCategory}
                 </span>
               </div>
-              
               <p className="text-xl mb-6">{gameState.currentQuestion.question}</p>
 
               {playerState.canAnswer ? (
@@ -104,22 +126,26 @@ export default function GamePlay() {
                   onClick={handleBuzz}
                   disabled={playerState.hasBuzzed}
                   className={`w-full py-4 rounded-lg font-bold text-lg ${
-                    playerState.hasBuzzed
-                      ? 'bg-gray-300'
-                      : 'bg-blue-500 hover:bg-blue-600 text-white'
+                    playerState.hasBuzzed ? 'bg-gray-300' : 'bg-blue-500 hover:bg-blue-600 text-white'
                   }`}
                 >
                   {playerState.hasBuzzed ? 'BUZZED!' : 'BUZZ TO ANSWER'}
                 </button>
               )}
 
-              {playerState.lastAnswerCorrect !== null && (
+              {playerState.buzzMessage && (
+                <div className="mt-4 p-3 rounded-lg text-center bg-yellow-100 text-yellow-800">
+                  {playerState.buzzMessage}
+                </div>
+              )}
+
+              {playerState.answerFeedback && (
                 <div className={`mt-4 p-3 rounded-lg text-center ${
-                  playerState.lastAnswerCorrect
+                  playerState.answerFeedback.includes("Correct")
                     ? 'bg-green-100 text-green-700'
                     : 'bg-red-100 text-red-700'
                 }`}>
-                  {playerState.lastAnswerCorrect ? 'Correct!' : 'Incorrect!'}
+                  {playerState.answerFeedback}
                 </div>
               )}
             </div>
@@ -130,9 +156,9 @@ export default function GamePlay() {
             <div className="space-y-2">
               {gameState.players.map(player => (
                 <div
-                  key={player.id}
+                  key={player.playerId}
                   className={`flex justify-between p-3 rounded-lg ${
-                    player.id === socket.id ? 'bg-purple-100' : 'bg-gray-50'
+                    player.socketId === socket.id ? 'bg-purple-100' : 'bg-gray-50'
                   }`}
                 >
                   <span>{player.name}</span>
