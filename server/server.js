@@ -1,3 +1,4 @@
+// server.js
 import express from 'express';
 import cors from 'cors';
 import { createServer } from 'http';
@@ -19,36 +20,39 @@ const io = new Server(server, {
   }
 });
 
-// Game state storage
-// Each game will store players in a Map keyed by persistent playerId.
+// Game state storage – players keyed by persistent playerId
 const activeGames = new Map();
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 
-// Helper function to get public game state
+// Helper: Get public game state (sorted players for leaderboard)
 const getPublicGameState = (game) => ({
   status: game.state,
-  players: Array.from(game.players.values()),
+  players: Array.from(game.players.values()).sort((a, b) => b.score - a.score),
   currentRound: game.currentRound || 1,
   currentQuestion: game.currentQuestionObj,
   currentCategory: game.quizContent.quizData.rounds[game.currentRound - 1].categories[0].name,
   buzzerQueue: game.buzzerQueue,
   currentAnswerer: game.currentAnswerer || null,
-  questionTimedOut: game.questionTimedOut || false
+  questionTimedOut: game.questionTimedOut || false,
+  remainingTime: game.remainingTime || 0,
+  chatMessages: game.chatMessages || []
 });
 
 // Function to generate quiz content using an LLM
 const generateQuizContent = async (config) => {
   const { rounds, categoriesPerRound, questionsPerCategory } = config;
   try {
-    const response = await axios.post('https://api.openai.com/v1/chat/completions', {
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content: `
+    const response = await axios.post(
+      'https://api.openai.com/v1/chat/completions',
+      {
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `
 Generate quiz content for ${rounds} rounds with ${categoriesPerRound} categories per round and ${questionsPerCategory} questions per category. Each category should have a name, description, and open-ended questions with clear answers. Return the output as a JSON object with the following structure:
 {
   "potentialCategories": [
@@ -71,19 +75,21 @@ Generate quiz content for ${rounds} rounds with ${categoriesPerRound} categories
   }
 }
 `
-        },
-        {
-          role: "user",
-          content: `Generate ${rounds} rounds of quiz content with ${categoriesPerRound} categories per round and ${questionsPerCategory} questions per category. Each category should have a name and description. Each question should be open-ended with a clear answer.`
+          },
+          {
+            role: "user",
+            content: `Generate ${rounds} rounds of quiz content with ${categoriesPerRound} categories per round and ${questionsPerCategory} questions per category. Each category should have a name and description. Each question should be open-ended with a clear answer.`
+          }
+        ],
+        temperature: 0.7
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+          'Content-Type': 'application/json'
         }
-      ],
-      temperature: 0.7
-    }, {
-      headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
-        'Content-Type': 'application/json'
       }
-    });
+    );
     console.log("Raw Quiz Content:", response.data.choices[0].message.content);
     const quizData = JSON.parse(response.data.choices[0].message.content);
     console.log("Parsed Quiz Content:", quizData);
@@ -101,9 +107,7 @@ app.post('/api/games', async (req, res) => {
     if (!gameConfig) throw new Error("Invalid game configuration");
     const gameId = crypto.randomUUID().slice(0, 6).toUpperCase();
 
-    // Generate quiz content using the LLM
     const quizContent = await generateQuizContent(gameConfig);
-
     if (!quizContent.quizData || !Array.isArray(quizContent.quizData.rounds)) {
       throw new Error("Invalid quiz content structure.");
     }
@@ -111,18 +115,18 @@ app.post('/api/games', async (req, res) => {
     const initialGameState = {
       config: gameConfig,
       quizContent,
-      // Players stored in a Map keyed by persistent playerId.
       players: new Map(),
       state: 'lobby',
       hostSocket: null,
       currentRound: 1,
       currentQuestionIndex: 0,
-      // Use an ordered buzzer queue that stores persistent playerIds.
       buzzerQueue: [],
       currentAnswerer: null,
       questionTimedOut: false,
       currentQuestionObj: quizContent.quizData.rounds[0].categories[0].questions[0],
-      questionTimer: null
+      timerInterval: null,  // will store the current timer interval id
+      remainingTime: 0,       // updated per timer phase
+      chatMessages: []
     };
 
     activeGames.set(gameId, initialGameState);
@@ -134,17 +138,74 @@ app.post('/api/games', async (req, res) => {
   }
 });
 
-// Start a timer for the current question (15 seconds)
-const startQuestionTimer = (game, gameId) => {
-  if (game.questionTimer) clearTimeout(game.questionTimer);
-  game.questionTimer = setTimeout(() => {
-    if (game.state === 'questionActive') {
+// Timer Functions
+// Start the Buzz Timer (15 seconds): countdown during which players may buzz.
+const startBuzzTimer = (game, gameId) => {
+  if (game.timerInterval) clearInterval(game.timerInterval);
+  game.remainingTime = 15;
+  io.to(gameId).emit('timerUpdate', { remainingTime: game.remainingTime });
+  game.timerInterval = setInterval(() => {
+    if (game.state !== 'questionActive') {
+      clearInterval(game.timerInterval);
+      return;
+    }
+    game.remainingTime -= 1;
+    io.to(gameId).emit('timerUpdate', { remainingTime: game.remainingTime });
+    if (game.remainingTime <= 0) {
+      clearInterval(game.timerInterval);
       game.state = 'answered';
       game.questionTimedOut = true;
       io.to(gameId).emit('gameState', getPublicGameState(game));
-      console.log(`Question timed out in game ${gameId}`);
+      console.log(`Buzz timer expired in game ${gameId}`);
     }
-  }, 15000);
+  }, 1000);
+};
+
+// Start the Answer Timer (10 seconds): countdown for the active answerer.
+const startAnswerTimer = (game, gameId) => {
+  if (game.timerInterval) clearInterval(game.timerInterval);
+  game.remainingTime = 10;
+  io.to(gameId).emit('timerUpdate', { remainingTime: game.remainingTime });
+  game.timerInterval = setInterval(() => {
+    if (game.state !== 'questionActive') {
+      clearInterval(game.timerInterval);
+      return;
+    }
+    game.remainingTime -= 1;
+    io.to(gameId).emit('timerUpdate', { remainingTime: game.remainingTime });
+    if (game.remainingTime <= 0) {
+      clearInterval(game.timerInterval);
+      game.state = 'answered';
+      game.questionTimedOut = true;
+      io.to(gameId).emit('gameState', getPublicGameState(game));
+      console.log(`Answer timer expired in game ${gameId}`);
+    }
+  }, 1000);
+};
+
+// Pause and Resume functions.
+const pauseGame = (game, gameId) => {
+  if (game.timerInterval) {
+    clearInterval(game.timerInterval);
+    game.timerInterval = null;
+  }
+  game.state = 'paused';
+  io.to(gameId).emit('gameState', getPublicGameState(game));
+  console.log(`Game ${gameId} paused at ${game.remainingTime}s remaining.`);
+};
+
+const resumeGame = (game, gameId) => {
+  // Determine which timer phase to resume: if someone has buzzed, resume answer timer; otherwise, resume buzz timer.
+  if (game.buzzerQueue.length > 0) {
+    game.state = 'questionActive';
+    io.to(gameId).emit('gameState', getPublicGameState(game));
+    startAnswerTimer(game, gameId);
+  } else {
+    game.state = 'questionActive';
+    io.to(gameId).emit('gameState', getPublicGameState(game));
+    startBuzzTimer(game, gameId);
+  }
+  console.log(`Game ${gameId} resumed with ${game.remainingTime}s remaining.`);
 };
 
 // WebSocket Handlers
@@ -166,31 +227,27 @@ io.on('connection', (socket) => {
   });
 
   // Player joining (or rejoining)
-  // Expect: { gameId, playerName, playerId, rejoin }
-  socket.on('joinGame', ({ gameId, playerName, playerId, rejoin }) => {
+  socket.on('joinGame', ({ gameId, playerName, playerId, avatar, rejoin }) => {
     try {
       const game = activeGames.get(gameId);
       if (!game) throw new Error("Game not found");
       if (game.state !== 'lobby' && !rejoin)
         throw new Error("Game has already started");
 
-      // Save the persistent playerId on the socket for later use.
       socket.playerId = playerId;
-
-      // If a player with this persistent id already exists, update their socketId.
       if (game.players.has(playerId)) {
         const existingPlayer = game.players.get(playerId);
         existingPlayer.socketId = socket.id;
-        // (Optionally update the name if it changed)
         existingPlayer.name = playerName;
+        if (avatar) existingPlayer.avatar = avatar;
       } else {
-        // Otherwise, create a new entry.
         const playerData = {
           playerId,
           name: playerName,
           socketId: socket.id,
           score: 0,
-          hasBuzzed: false
+          hasBuzzed: false,
+          avatar: avatar || null
         };
         game.players.set(playerId, playerData);
       }
@@ -216,10 +273,10 @@ io.on('connection', (socket) => {
       game.currentAnswerer = null;
       game.questionTimedOut = false;
       game.currentQuestionObj = game.quizContent.quizData.rounds[0].categories[0].questions[0];
-
+      // Instead of starting answer timer immediately, start the buzz timer.
+      startBuzzTimer(game, gameId);
       io.to(gameId).emit('gameState', getPublicGameState(game));
       console.log(`Game started: ${gameId} with question:`, game.currentQuestionObj);
-      startQuestionTimer(game, gameId);
     } catch (error) {
       socket.emit('error', error.message);
     }
@@ -232,23 +289,43 @@ io.on('connection', (socket) => {
       if (!game) throw new Error("Game not found");
       if (socket.id !== game.hostSocket) throw new Error("Unauthorized");
 
-      if (game.questionTimer) clearTimeout(game.questionTimer);
+      if (game.timerInterval) clearInterval(game.timerInterval);
 
-      // Reset each player's buzz flag.
       game.players.forEach(player => {
         player.hasBuzzed = false;
       });
       game.buzzerQueue = [];
       game.currentAnswerer = null;
       game.questionTimedOut = false;
-
       game.currentQuestionIndex++;
       game.currentQuestionObj = getCurrentQuestion(game);
       game.state = 'questionActive';
-
+      // Start buzz timer for the new question.
+      startBuzzTimer(game, gameId);
       io.to(gameId).emit('gameState', getPublicGameState(game));
       console.log(`Advanced to question index ${game.currentQuestionIndex} in game ${gameId}`);
-      startQuestionTimer(game, gameId);
+    } catch (error) {
+      socket.emit('error', error.message);
+    }
+  });
+
+  // Host pause and resume events.
+  socket.on('pauseGame', (gameId) => {
+    try {
+      const game = activeGames.get(gameId);
+      if (!game) throw new Error("Game not found");
+      if (socket.id !== game.hostSocket) throw new Error("Unauthorized");
+      pauseGame(game, gameId);
+    } catch (error) {
+      socket.emit('error', error.message);
+    }
+  });
+  socket.on('resumeGame', (gameId) => {
+    try {
+      const game = activeGames.get(gameId);
+      if (!game) throw new Error("Game not found");
+      if (socket.id !== game.hostSocket) throw new Error("Unauthorized");
+      resumeGame(game, gameId);
     } catch (error) {
       socket.emit('error', error.message);
     }
@@ -263,11 +340,9 @@ io.on('connection', (socket) => {
 
       const pid = socket.playerId;
       if (!pid) throw new Error("Player identification missing");
-
       const player = game.players.get(pid);
       if (!player) throw new Error("Player not registered");
 
-      // Prevent duplicate buzzes by persistent playerId.
       if (game.buzzerQueue.includes(pid)) {
         socket.emit('buzzAcknowledged', { success: false, message: "You already buzzed." });
         return;
@@ -279,10 +354,11 @@ io.on('connection', (socket) => {
       socket.emit('buzzAcknowledged', { success: true, message: "Buzz registered." });
       console.log(`Buzz from ${player.name} in ${gameId}. Queue: ${game.buzzerQueue}`);
 
-      // If this is the first buzz, mark this player as the current answerer.
+      // If first buzz, clear buzz timer and start answer timer.
       if (game.buzzerQueue.length === 1) {
         game.currentAnswerer = pid;
-        // Send allowAnswer to that player's current socket.
+        if (game.timerInterval) clearInterval(game.timerInterval);
+        startAnswerTimer(game, gameId);
         const targetSocketId = game.players.get(pid).socketId;
         io.to(targetSocketId).emit('allowAnswer');
       }
@@ -298,12 +374,10 @@ io.on('connection', (socket) => {
       if (!game) throw new Error("Game not found");
       const pid = socket.playerId;
       if (!pid) throw new Error("Player identification missing");
-
       if (!game.currentAnswerer || game.currentAnswerer !== pid) {
         socket.emit('error', 'Not your turn to answer.');
         return;
       }
-
       const correctAnswer = game.currentQuestionObj.answer.trim().toLowerCase();
       const submittedAnswer = answer.trim().toLowerCase();
       const player = game.players.get(pid);
@@ -316,12 +390,11 @@ io.on('connection', (socket) => {
         io.to(gameId).emit('gameState', getPublicGameState(game));
         socket.emit('answerResult', { correct: true, message: "Correct answer!" });
         console.log(`${player.name} answered correctly in game ${gameId}.`);
-        if (game.questionTimer) clearTimeout(game.questionTimer);
+        if (game.timerInterval) clearInterval(game.timerInterval);
       } else {
         player.score -= 10;
         socket.emit('answerResult', { correct: false, message: "Incorrect answer!" });
         console.log(`${player.name} answered incorrectly in game ${gameId}.`);
-        // Remove this player from the queue.
         game.buzzerQueue = game.buzzerQueue.filter(id => id !== pid);
         if (game.buzzerQueue.length > 0) {
           game.currentAnswerer = game.buzzerQueue[0];
@@ -339,9 +412,33 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Chat Message Handling
+  socket.on('chatMessage', ({ gameId, senderName, message }) => {
+    try {
+      const game = activeGames.get(gameId);
+      if (!game) throw new Error("Game not found");
+      const chatMsg = {
+        senderName,
+        message,
+        time: new Date().toLocaleTimeString()
+      };
+      if (!game.chatMessages) {
+        game.chatMessages = [];
+      }
+      game.chatMessages.push(chatMsg);
+      if (game.chatMessages.length > 10) {
+        game.chatMessages.shift();
+      }
+      io.to(gameId).emit('chatMessage', chatMsg);
+      console.log(`Chat in ${gameId} from ${senderName}: ${message}`);
+    } catch (error) {
+      socket.emit('error', error.message);
+    }
+  });
+
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);
-    // (Optional) You can implement logic here to remove a player if desired.
+    // (Optional) Remove player logic if desired.
   });
 });
 

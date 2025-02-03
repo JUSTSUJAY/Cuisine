@@ -1,3 +1,4 @@
+// client/src/GamePlay.jsx
 import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { io } from 'socket.io-client';
@@ -13,6 +14,7 @@ export default function GamePlay() {
     answerFeedback: ''
   });
   const [answer, setAnswer] = useState('');
+  const [remainingTime, setRemainingTime] = useState(0);
 
   useEffect(() => {
     const newSocket = io('http://localhost:5000');
@@ -32,8 +34,9 @@ export default function GamePlay() {
     newSocket.on('gameState', (state) => {
       console.log('Received game state:', state);
       setGameState(state);
+      setRemainingTime(state.remainingTime || 0);
       setPlayerState(prev => ({ ...prev, answerFeedback: '' }));
-      // If not our turn to answer, disable answer form.
+      // If not our turn, disable answer form.
       if (state.currentAnswerer !== playerId) {
         setPlayerState(prev => ({ ...prev, canAnswer: false }));
       }
@@ -41,6 +44,11 @@ export default function GamePlay() {
       if (state.status === 'questionActive') {
         setPlayerState(prev => ({ ...prev, hasBuzzed: false, buzzMessage: '' }));
       }
+    });
+
+    newSocket.on('timerUpdate', ({ remainingTime }) => {
+      // Update the countdown timer
+      setRemainingTime(remainingTime);
     });
 
     newSocket.on('allowAnswer', () => {
@@ -90,8 +98,11 @@ export default function GamePlay() {
         <>
           <div className="mb-8">
             <h1 className="text-3xl font-bold mb-2">Round {gameState.currentRound}</h1>
-            <div className="bg-purple-100 p-4 rounded-lg">
+            <div className="bg-purple-100 p-4 rounded-lg mb-4">
               <h2 className="text-xl">Score: {getCurrentPlayer()?.score || 0}</h2>
+              <div className="mt-2 text-lg font-bold">
+                Time Remaining: {remainingTime}s
+              </div>
             </div>
           </div>
 

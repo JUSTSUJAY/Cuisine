@@ -1,3 +1,4 @@
+// client/src/HostPanel.jsx
 import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { io } from 'socket.io-client';
@@ -6,12 +7,18 @@ export default function HostPanel() {
   const { gameId } = useParams();
   const [gameState, setGameState] = useState(null);
   const [socket, setSocket] = useState(null);
+  const [remainingTime, setRemainingTime] = useState(0);
 
   useEffect(() => {
     const newSocket = io('http://localhost:5000');
     newSocket.emit('hostJoin', gameId);
     newSocket.on('gameState', (state) => {
       setGameState(state);
+      setRemainingTime(state.remainingTime || 0);
+      // For host, do not auto-navigate; they always stay here.
+    });
+    newSocket.on('timerUpdate', ({ remainingTime }) => {
+      setRemainingTime(remainingTime);
     });
     setSocket(newSocket);
     return () => newSocket.disconnect();
@@ -25,6 +32,55 @@ export default function HostPanel() {
     socket.emit('advanceQuestion', gameId);
   };
 
+  const pauseGame = () => {
+    socket.emit('pauseGame', gameId);
+  };
+
+  const resumeGame = () => {
+    socket.emit('resumeGame', gameId);
+  };
+
+  // Determine which control buttons to show based on the game state.
+  // When the game is paused, show the "Resume Game" button.
+  // When the game is running (questionActive or answered), show "Pause Game" (and Next if answered).
+  const renderControls = () => {
+    if (!gameState) return null;
+
+    if (gameState.status === 'lobby') {
+      return (
+        <div className="mb-4">
+          <button onClick={startGame} className="bg-green-500 text-white px-4 py-2 rounded">
+            Start Game
+          </button>
+        </div>
+      );
+    }
+
+    return (
+      <div className="flex flex-col items-center gap-4 mb-4">
+        <div className="mb-2 text-lg font-bold">
+          Time Remaining: {remainingTime}s
+        </div>
+        <div className="flex gap-4">
+          {gameState.status === 'paused' ? (
+            <button onClick={resumeGame} className="bg-green-500 text-white px-4 py-2 rounded">
+              Resume Game
+            </button>
+          ) : (
+            <button onClick={pauseGame} className="bg-orange-500 text-white px-4 py-2 rounded">
+              Pause Game
+            </button>
+          )}
+          {gameState.status !== 'paused' && (
+            <button onClick={nextQuestion} className="bg-blue-500 text-white px-4 py-2 rounded">
+              Next Question
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="max-w-4xl mx-auto p-6">
       <h1 className="text-2xl font-bold mb-4">Hosting Game: {gameId}</h1>
@@ -34,16 +90,12 @@ export default function HostPanel() {
         <p className="text-blue-600">{`${window.location.origin}/play/${gameId}`}</p>
       </div>
 
-      {gameState && gameState.status === 'lobby' && (
-        <div className="mb-4">
-          <button onClick={startGame} className="bg-green-500 text-white px-4 py-2 rounded">
-            Start Game
-          </button>
-        </div>
-      )}
+      {renderControls()}
 
       {gameState &&
-        (gameState.status === 'questionActive' || gameState.status === 'answered') && (
+        (gameState.status === 'questionActive' ||
+          gameState.status === 'answered' ||
+          gameState.status === 'paused') && (
           <div className="mb-4">
             <div className="bg-white p-4 rounded shadow mb-4">
               <h3 className="font-bold">Category: {gameState.currentCategory}</h3>
@@ -57,9 +109,6 @@ export default function HostPanel() {
                 <p className="text-red-600 font-bold">Time's up! No answer.</p>
               )}
             </div>
-            <button onClick={nextQuestion} className="bg-blue-500 text-white px-4 py-2 rounded">
-              Next Question
-            </button>
           </div>
         )}
 
